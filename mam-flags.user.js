@@ -3,7 +3,7 @@
 // @namespace   Violentmonkey Scripts
 // @match       https://www.myanonamouse.net/*
 // @grant       none
-// @version     0.2
+// @version     0.3
 // @author      jack
 // @description MaM userscript adding imageboard-like country flags next to user links
 // ==/UserScript==
@@ -127,8 +127,15 @@ function hasKey(obj, key) {
   return false;
 }
 
+/* Compat with MAM+ gift all feature ?? (can't test yet) */
+function stripUsername(username) {
+  return username.replace(' ☑', '');
+}
+
 /* Returns true if we already have a user/flag in storageCache */
 function flagInCache(username) {
+  username = stripUsername(username);
+  
   //return indexOfElem(storageCache, username) >= 0;
   
   for (let i = 0; i < keylen(storageCache); i ++) {
@@ -347,7 +354,7 @@ function fetchAndAddFlagImage(href) {
       
         let flagSrc = 'https://cdn.myanonamouse.net/pic/flags/' + countryCode + '.svg';
       
-        storageCache[href.innerText] = {'flag': flagSrc, 'title': countryName}
+        storageCache[stripUsername(href.innerText)] = {'flag': flagSrc, 'title': countryName}
         attachFlag(href, flagSrc, 'Country: ' + countryName, countryName);
 
     }).catch(function (err) {
