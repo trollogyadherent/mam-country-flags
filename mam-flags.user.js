@@ -3,7 +3,7 @@
 // @namespace   Violentmonkey Scripts
 // @match       https://www.myanonamouse.net/*
 // @grant       none
-// @version     0.3
+// @version     0.4
 // @author      jack
 // @description MaM userscript adding imageboard-like country flags next to user links
 // ==/UserScript==
@@ -17,6 +17,12 @@
 /**/
 /**/ /* Size of the flags, applied only with non-chan flags (default: 16) */
 /**/ var flagWidth = 16;
+/**/
+/**/ /* On which side of the username should the flags be displayed? 'right' / 'left' (default: 'right') */
+/**/ var flagSide = 'right';
+/**/
+/**/ /* Space between flag and username (default: 5) */
+/**/ var flagPadding = 5;
 /**/
 /**/ /* 4chan style flags (instead of MaM flag svg's, 4chan flag images are used) (default: false) */
 /**/ var chan_style = false;
@@ -76,6 +82,18 @@ function main() {
 }
 
 function saveCacheToStorage() {
+  /* Loading present cache and adding entried from it to the object that will be saved, in case multiple tabs are updating the cache */
+  let jsonString = localStorage.getItem("cache");
+  if (jsonString != null && jsonString.length > 0) {
+    storageCachePresent = JSON.parse(jsonString);
+    for (let i = 0; i < keylen(storageCachePresent); i ++) {
+      if(!hasKey(storageCache, keyAtIndex(storageCachePresent, i))) {
+        storageCache[keyAtIndex(storageCachePresent, i)] = elemAtIndex(storageCachePresent, i);
+      }
+    }
+  }
+  
+  /* Saving the cache object as a string in localStorage */
   localStorage.setItem("cache", JSON.stringify(storageCache));
   localStorage.setItem("timestamp", Date.now());
 }
@@ -197,10 +215,11 @@ function updateFlags() {
   let currentBatch = [];
   for (let i = 0, j = 0; i < userHrefs.length; i ++, j ++) {  
     href = userHrefs[i];
-    if(flagInCache(href.innerText)) {
+    username = stripUsername(href.innerText);
+    if(flagInCache(username)) {
       if (!flagAttached(href)) {
         /* We have this username in cache AND no flag is attached to this href */
-        attachFlag(href, storageCache[href.innerText]['flag'], storageCache[href.innerText]['title']);
+        attachFlag(href, storageCache[username]['flag'], storageCache[username]['title']);
       }
     } else {
       currentBatch.push(userHrefs[i]);
@@ -273,11 +292,21 @@ function attachFlag(href, flagUrl, countryName) {
     flagImg.style.backgroundPosition = "-" + flag_offset_dict[flag_code]['x'] + "px -" + flag_offset_dict[flag_code]['y'] + "px";
     flagImg.style.width = '16px';
     flagImg.style.height = '11px';
-    flagImg.style.marginLeft = "5px";
+    
+    if (flagSide == 'right') {
+      flagImg.style.marginLeft = flagPadding + "px";
+    } else {
+      flagImg.style.marginRight = flagPadding + "px";
+    }
   } else {
     flagImg.src = flagUrl;
     flagImg.width = flagWidth;
-    flagImg.style.paddingLeft = "5px";
+    
+    if (flagSide == 'right') {
+      flagImg.style.paddingLeft = flagPadding + "px";
+    } else {
+      flagImg.style.paddingRight = flagPadding + "px";
+    }
   }
   
   
@@ -314,11 +343,24 @@ function attachFlag(href, flagUrl, countryName) {
     });
   }
   
-  href.appendChild(flagImg);
+  if (flagSide == 'right') {
+    href.appendChild(flagImg);
+  } else {
+    href.prepend(flagImg);
+  }
+  
+  /* Adding a css class that will mark that element as having a flag */
+  if (countryName != 'Loading...') {
+    href.className += ' flag-attached';
+  }
 }
 
 /* Returns true if a user href already contains an flag image */
 function flagAttached(href) {
+  if (href.classList.contains('flag-attached')) {
+    return true;
+  }
+  
   let children = href.children;
   let flagAlreadyAttached = false;
   for (let i = 0; i < children.length; i ++) {
@@ -332,29 +374,39 @@ function flagAttached(href) {
 
 /* The thing that talks with the API */
 function fetchAndAddFlagImage(href) {
-  if (flagInCache(href.innerText)) {
+  username = stripUsername(href.innerText);
+  
+  if (flagInCache(username)) {
     if (!flagAttached(href)) {
       /* No need to fetch anything here */
-      attachFlag(href, storageCache[href.innerText]['flag'], storageCache[href.innerText]['title']);
+      attachFlag(href, storageCache[username]['flag'], storageCache[username]['title']);
     }
   } else {
+    console.log(storageCache);
+    console.log('fetching ' + username);
     fetch(getApiUrlFromUserUrl(href.href)).then(
       /* Getting the JSON */
       function (u) { return u.json(); }
     ).then(function (json) {
+
+      if (flagAttached(href) && flagInCache(username)) {
+        return;
+      }
+      
         let countryCode = json['country_code'];
         let countryName = json['country_name'];
         
         if (countryCode == null || countryName == null) {
           /* User has not set a country */
           attachFlag(href, unknown_flag_url, 'Unknown');
-          storageCache[href.innerText] = {'flag': unknown_flag_url, 'title': 'Unknown'}
+          storageCache[username] = {'flag': unknown_flag_url, 'title': 'Unknown'}
           return;
         }
       
         let flagSrc = 'https://cdn.myanonamouse.net/pic/flags/' + countryCode + '.svg';
       
-        storageCache[stripUsername(href.innerText)] = {'flag': flagSrc, 'title': countryName}
+        storageCache[username] = {'flag': flagSrc, 'title': countryName};
+        saveCacheToStorage();
         attachFlag(href, flagSrc, 'Country: ' + countryName, countryName);
 
     }).catch(function (err) {
@@ -366,6 +418,7 @@ function fetchAndAddFlagImage(href) {
 
 /* Transform shoutbox flags (puts the to the right and enables 4chan styling) */
 function transformShoutboxFlags() {
+  //return;
   /* Getting all links on the site */
   let hrefs = document.getElementsByTagName('a');
   
@@ -374,27 +427,36 @@ function transformShoutboxFlags() {
   for (let i = 0; i < hrefs.length; i ++) {
     let href = hrefs[i];  
     if (href.href.startsWith('https://www.myanonamouse.net/u/') && hrefInShoutBox(href)) {
-      /* User quotes don't have flags, filtering them too */
+      
+      /* User quotes and tags don't have flags, filtering them too */
+      let foundAttachedClass = false;
       for (let j = 0; j < href.children.length; j ++) {
-        if (href.children[j].classList.contains('ui-draggable') && href.children[j].classList.contains('ui-draggable-handle')) {
-          for (let k = 0; k < href.children[j].children.length; k ++) {
-            if (href.children[j].children[k].classList.contains('sb_country')) {
-              userHrefs_.push(href);
-              break;
-            }
-          }
+        if (href.children[j].classList.contains('flag-attached')) {
+          foundAttachedClass = true;
+          break;
         }
+      }
+      if (href.previousSibling.textContent == 'More Options' && !flagAttached(href) && !foundAttachedClass) {
+        userHrefs_.push(href);
       }
     }
   }
   
   for (let i = 0; i < userHrefs_.length; i ++) {
+    if (flagAttached(userHrefs_[i]) || flagAttached(userHrefs_[i].parentElement)) {
+      continue;
+    }
     let imgElem = userHrefs_[i].getElementsByTagName('span')[0].getElementsByTagName('img')[0];
-    let parentSpan = imgElem.parentElement;
-    let flagUrl = imgElem.src;
-    let countryName = imgElem.title;
-    parentSpan.removeChild(imgElem);
-    attachFlag(parentSpan, flagUrl, countryName);
+    if (imgElem != null) {
+      let parentSpan = imgElem.parentElement;
+      let flagUrl = imgElem.src;
+      let countryName = imgElem.title;
+      parentSpan.removeChild(imgElem);
+      attachFlag(parentSpan, flagUrl, countryName);
+    } else {
+      let parentElement = userHrefs_[i];//.parentElement;
+      attachFlag(parentElement, unknown_flag_url, 'Unknown');
+    }
   }
 }
 
@@ -402,3 +464,6 @@ function transformShoutboxFlags() {
 window.addEventListener('load', function() {
     main();
 }, false);
+
+
+window.saveCacheToStorage = saveCacheToStorage
