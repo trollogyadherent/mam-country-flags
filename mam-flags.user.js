@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name        MaM Flags
-// @namespace   Violentmonkey Scripts
+// @namespace   Scripts
 // @match       https://www.myanonamouse.net/*
 // @grant       none
-// @version     0.4
+// @version     0.5
 // @author      jack
 // @description MaM userscript adding imageboard-like country flags next to user links
 // ==/UserScript==
@@ -42,7 +42,7 @@
 /************************/
 
 /************************/
-/* Don't touch if you don't know what this does */
+/* Don't touch if you don't know what this does, these are not necessarily even settings */
 /**/ 
 /**/ /* How many url's to fetch in one batch */
 /**/ var fetchNumber = 5;
@@ -68,16 +68,43 @@
 /**/ /* How often do we save the cache to disk? */
 /**/ var saveCacheToStorageInterval = 10000;
 /**/ 
+/**/ /* Var holding all valid user links found in page */
+/**/ var userHrefs = [];
+/**/ 
+/**/ /* Which usernames have already been added to the fetch queue */
+/**/ var fetchingUsernames = [];
+/**/ 
 /************************/
+
+
 
 function main() {
   loadCacheFromStorage();
   
   transformShoutboxFlags();
-  updateFlags();
-  setInterval(updateFlags, flagUpdateTime);
-  setInterval(transformShoutboxFlags, flagUpdateTime);
+  //updateFlags();
+  //setInterval(updateFlags, flagUpdateTime);
   
+  getUserHrefs();
+  
+  let hrefUsernames = [];
+  for (let i = 0; i < userHrefs.length; i ++) {
+    hrefUsernames.push(stripUsername(userHrefs[i].innerText));
+  }
+  
+  //console.log('Identified usernames:');
+  //console.log(hrefUsernames);
+  
+  fetchUsers();
+  attachLoadingFlags();
+  attachRealFlags();
+  
+  setInterval(getUserHrefs, 400);
+  setInterval(fetchUsers, 2500);
+  setInterval(attachLoadingFlags, 500);
+  setInterval(attachRealFlags, 500);
+  
+  setInterval(transformShoutboxFlags, flagUpdateTime);
   setInterval(saveCacheToStorage, saveCacheToStorageInterval);
 }
 
@@ -110,8 +137,16 @@ function loadCacheFromStorage() {
   if (jsonString != null && jsonString.length > 0) {
     storageCache = JSON.parse(jsonString);
   }
-  console.log('storageCache:');
-  console.log(storageCache);
+  
+  //console.log('storageCache:');
+  //console.log(storageCache);
+}
+
+function deleteCache() {
+  storageCache = {};
+  localStorage.setItem("cache", JSON.stringify(storageCache));
+  localStorage.setItem("timestamp", Date.now());
+  console.log("Cleared MaM flag cache!");
 }
 
 /* Useful JavaScript object manipulation functions */
@@ -185,50 +220,90 @@ function getApiUrlFromUserUrl(userUrl) {
   return 'https://www.myanonamouse.net/jsonLoad.php?pretty&id=' + userUrl.substring(userUrl.indexOf('/u/') + '/u/'.length)
 }
 
-/* Main logic */
-function updateFlags() {
+/* Transform shoutbox flags (puts the to the right and enables 4chan styling) */
+function transformShoutboxFlags() {
+  //return;
+  /* Getting all links on the site */
+  let hrefs = document.getElementsByTagName('a');
+  
+  /* Filtering user links, excluding every thing that is not in the shoutbox */
+  let userHrefs_ = [];
+  for (let i = 0; i < hrefs.length; i ++) {
+    let href = hrefs[i];  
+    if (href.href.startsWith('https://www.myanonamouse.net/u/') && hrefInShoutBox(href)) {
+      
+      /* User quotes and tags don't have flags, filtering them too */
+      let foundAttachedClass = false;
+      for (let j = 0; j < href.children.length; j ++) {
+        if (href.children[j].classList.contains('flag-attached')) {
+          foundAttachedClass = true;
+          break;
+        }
+      }
+      if (href.previousSibling.textContent == 'More Options' && !flagAttached(href) && !foundAttachedClass) {
+        userHrefs_.push(href);
+      }
+    }
+  }
+  
+  for (let i = 0; i < userHrefs_.length; i ++) {
+    if (flagAttached(userHrefs_[i]) || flagAttached(userHrefs_[i].parentElement)) {
+      continue;
+    }
+    let imgElem = userHrefs_[i].getElementsByTagName('span')[0].getElementsByTagName('img')[0];
+    if (imgElem != null) {
+      let parentSpan = imgElem.parentElement;
+      let flagUrl = imgElem.src;
+      let countryName = imgElem.title;
+      parentSpan.removeChild(imgElem);
+      attachFlag(parentSpan, flagUrl, countryName);
+    } else {
+      let parentElement = userHrefs_[i];//.parentElement;
+      attachFlag(parentElement, unknown_flag_url, 'Unknown');
+    }
+  }
+}
+
+function getUserHrefs() {
+  userHrefs = [];
   
   /* Getting all links on the site */
   let hrefs = document.getElementsByTagName('a');
   
   /* Filtering user links, also excluding links in forum posts, online users list, and shoutbox */
-  let userHrefs = [];
   for (let i = 0; i < hrefs.length; i ++) {
     let href = hrefs[i];  
     if (href.href.startsWith('https://www.myanonamouse.net/u/') && !hrefInOnlineUsers(href) && !hrefInForumText(href) && !hrefInShoutBox(href)) {
       userHrefs.push(href);
     }
   }
+}
+
+function fetchUsers() {
+  //console.log('fetching users...');
   
-  ///console.log("MaM Flags: Found " + userHrefs.length + " user links");
-  
-  /* For each href, if a flag is not attached, attach a "loading flag", while waiting to get the actual info */
-  for (let i = 0; i < userHrefs.length; i ++) {
-    if (!flagAttached(userHrefs[i])) {
-      attachFlag(userHrefs[i], loading_flag_url, "Loading...");
-    }
-  }
-  
-  /* User info is fetched in batches, to prevent being rate limited (which should not really occur now but I will keep this mechanism) */
+  /* User info is fetched in batches, to prevent being rate limited */
   /* Here is just the preparation of the batches */
   let fetchBatches = [];
   let currentBatch = [];
-  for (let i = 0, j = 0; i < userHrefs.length; i ++, j ++) {  
+  for (let i = 0, j = 0; i < userHrefs.length; i ++) {  
     href = userHrefs[i];
     username = stripUsername(href.innerText);
-    if(flagInCache(username)) {
-      if (!flagAttached(href)) {
-        /* We have this username in cache AND no flag is attached to this href */
-        attachFlag(href, storageCache[username]['flag'], storageCache[username]['title']);
-      }
-    } else {
-      currentBatch.push(userHrefs[i]);
+    
+    if (fetchingUsernames.includes(username) || flagInCache(username)) {
+      continue;
     }
+    
+    j ++;
+    
+    //console.log('batching ' + username);
+    fetchingUsernames.push(username);
+    currentBatch.push(userHrefs[i]);
     
     /* j lets us know when a url batch "is full" and we should start a new one */
     if (j == fetchNumber - 1 || i == userHrefs.length - 1) {
       j = 0;
-      
+
       /* deepcopying currentBatch */
       let tempBatch = [];
       for (let k = 0; k < currentBatch.length; k ++) {
@@ -241,29 +316,89 @@ function updateFlags() {
     }
   }
   
+  //console.log('finished batching:');
+  //console.log(fetchBatches);
+  
   /* For each href-batch... */
   for (let i = 0, fetchCounter = 0; i < fetchBatches.length; i ++) {
     /* Ignoring empty batches */
     if (fetchBatches[i].length == 0) {
-      return;
+      continue;
     }
     
     /* ...we trigger a delayed anonymous function call that downolads the data */
     setTimeout(function() {
+      let batchDeepcopy = [];
+      for (let k = 0; k < fetchBatches[i].length; k ++) {
+        batchDeepcopy.push(fetchBatches[i][k]);
+      }
+      
       /* For each href in the current batch */
-      for (let j = 0; j < fetchBatches[i].length; j ++) {
+      for (let j = 0; j < batchDeepcopy.length; j ++) {
         /* Getting the href element */
-        let href = fetchBatches[i][j];
-        /* Calling the actual thing that will perform a javascript http request to get the json */
-        fetchAndAddFlagImage(href);
+        let href = batchDeepcopy[j];
+        let username = stripUsername(href.innerText);
+        
+        //console.log(storageCache);
+        console.log('fetching ' + username);
+        fetch(getApiUrlFromUserUrl(href.href)).then(
+          /* Getting the JSON */
+          function (u) { return u.json(); }
+        ).then(function (json) {
+          
+          let countryCode = json['country_code'];
+          let countryName = json['country_name'];
+          let username = json['username'];
+
+          if (countryCode == null || countryName == null) {
+            /* User has not set a country */
+            storageCache[username] = {'flag': 'unknown', 'title': 'Unknown'}
+          } else {
+            let flagSrc = 'https://cdn.myanonamouse.net/pic/flags/' + countryCode + '.svg';
+            storageCache[username] = {'flag': flagSrc, 'title': countryName};
+          }
+          console.log('fetched ' + username);
+          console.log(storageCache);
+          saveCacheToStorage();
+        }).catch(function (err) {
+          // There was an error
+          console.warn('Something went wrong.', err);
+        });
+        
       }
     }, fetchWait * fetchCounter);
     fetchCounter ++;
   }
 }
 
+function attachLoadingFlags() {
+  /* For each href, if a flag is not attached, attach a "loading flag", while waiting to get the actual info */
+  for (let i = 0; i < userHrefs.length; i ++) {
+    if (!flagAttached(userHrefs[i])) {
+      attachFlag(userHrefs[i], loading_flag_url, "Loading...");
+    }
+  }
+}
+
+function attachRealFlags() {
+  for (let i = 0; i < userHrefs.length; i ++) {
+    let username = stripUsername(userHrefs[i].innerText);
+    if (flagInCache(username)) {
+      attachFlag(userHrefs[i], storageCache[username]['flag'], storageCache[username]['title']);
+    }
+  }
+}
+
 /* The piece of code responsible of injecting the html showing the flag */
 function attachFlag(href, flagUrl, countryName) {
+  if (flagAttached(href)) {
+    return;
+  }
+  
+  if (flagUrl == 'unknown') {
+    flagUrl = unknown_flag_url;
+  }
+  
   /* Removing the "loading" flag, if present */
   let child_to_remove = null;
   let children = href.children;
@@ -372,94 +507,6 @@ function flagAttached(href) {
   return flagAlreadyAttached;
 }
 
-/* The thing that talks with the API */
-function fetchAndAddFlagImage(href) {
-  username = stripUsername(href.innerText);
-  
-  if (flagInCache(username)) {
-    if (!flagAttached(href)) {
-      /* No need to fetch anything here */
-      attachFlag(href, storageCache[username]['flag'], storageCache[username]['title']);
-    }
-  } else {
-    console.log(storageCache);
-    console.log('fetching ' + username);
-    fetch(getApiUrlFromUserUrl(href.href)).then(
-      /* Getting the JSON */
-      function (u) { return u.json(); }
-    ).then(function (json) {
-
-      if (flagAttached(href) && flagInCache(username)) {
-        return;
-      }
-      
-        let countryCode = json['country_code'];
-        let countryName = json['country_name'];
-        
-        if (countryCode == null || countryName == null) {
-          /* User has not set a country */
-          attachFlag(href, unknown_flag_url, 'Unknown');
-          storageCache[username] = {'flag': unknown_flag_url, 'title': 'Unknown'}
-          return;
-        }
-      
-        let flagSrc = 'https://cdn.myanonamouse.net/pic/flags/' + countryCode + '.svg';
-      
-        storageCache[username] = {'flag': flagSrc, 'title': countryName};
-        saveCacheToStorage();
-        attachFlag(href, flagSrc, 'Country: ' + countryName, countryName);
-
-    }).catch(function (err) {
-      // There was an error
-      console.warn('Something went wrong.', err);
-    });
-  }
-}
-
-/* Transform shoutbox flags (puts the to the right and enables 4chan styling) */
-function transformShoutboxFlags() {
-  //return;
-  /* Getting all links on the site */
-  let hrefs = document.getElementsByTagName('a');
-  
-  /* Filtering user links, excluding every thing that is not in the shoutbox */
-  let userHrefs_ = [];
-  for (let i = 0; i < hrefs.length; i ++) {
-    let href = hrefs[i];  
-    if (href.href.startsWith('https://www.myanonamouse.net/u/') && hrefInShoutBox(href)) {
-      
-      /* User quotes and tags don't have flags, filtering them too */
-      let foundAttachedClass = false;
-      for (let j = 0; j < href.children.length; j ++) {
-        if (href.children[j].classList.contains('flag-attached')) {
-          foundAttachedClass = true;
-          break;
-        }
-      }
-      if (href.previousSibling.textContent == 'More Options' && !flagAttached(href) && !foundAttachedClass) {
-        userHrefs_.push(href);
-      }
-    }
-  }
-  
-  for (let i = 0; i < userHrefs_.length; i ++) {
-    if (flagAttached(userHrefs_[i]) || flagAttached(userHrefs_[i].parentElement)) {
-      continue;
-    }
-    let imgElem = userHrefs_[i].getElementsByTagName('span')[0].getElementsByTagName('img')[0];
-    if (imgElem != null) {
-      let parentSpan = imgElem.parentElement;
-      let flagUrl = imgElem.src;
-      let countryName = imgElem.title;
-      parentSpan.removeChild(imgElem);
-      attachFlag(parentSpan, flagUrl, countryName);
-    } else {
-      let parentElement = userHrefs_[i];//.parentElement;
-      attachFlag(parentElement, unknown_flag_url, 'Unknown');
-    }
-  }
-}
-
 /* Triggering main function after page has loaded */
 window.addEventListener('load', function() {
     main();
@@ -467,3 +514,4 @@ window.addEventListener('load', function() {
 
 
 window.saveCacheToStorage = saveCacheToStorage
+window.deleteCache = deleteCache
